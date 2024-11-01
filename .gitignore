@@ -1,1 +1,3 @@
 /workspaces/.env
+/workspaces/active/structurizr*json
+/workspaces/workspaces.yml

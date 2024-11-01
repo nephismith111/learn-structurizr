@@ -22,6 +22,19 @@ NC='\033[0m' # No Color
 
 WORKSPACES_DIR="./workspaces"
 
+# At the beginning of the script
+CONFIG_FILE="$WORKSPACES_DIR/workspaces.yml"
+
+# Check if yq is installed
+if ! command -v yq &> /dev/null; then
+    echo -e "${RED}Error: yq is not installed. Please install yq to use this script.${NC}"
+    exit 1
+fi
+
+# Load default URL
+STRUCTURIZR_URL=$(yq e '.default_url' "$CONFIG_FILE")
+
+
 # Function to mask sensitive variables
 mask_variable() {
     local var="$1"
@@ -33,44 +46,18 @@ mask_variable() {
 # Load environment variables from .env file if it exists
 if [ -f "$WORKSPACES_DIR/.env" ]; then
     echo -e "${YELLOW}Loading environment variables from $WORKSPACES_DIR/.env${NC}"
-    # Export variables while ignoring comments and empty lines
-    export $(grep -v '^#' "$WORKSPACES_DIR/.env" | xargs) || {
-        echo -e "${RED}Error: Failed to load environment variables from $WORKSPACES_DIR/.env${NC}"
-        exit 1
-    }
+    # Export all variables from .env
+    set -a
+    source "$WORKSPACES_DIR/.env"
+    set +a
 else
     echo -e "${YELLOW}.env file not found in $WORKSPACES_DIR. Relying on existing environment variables.${NC}"
-fi
-
-# Check required environment variables
-MISSING_VARS=()
-
-if [ -z "$STRUCTURIZR_KEY" ]; then
-    MISSING_VARS+=("STRUCTURIZR_KEY")
-fi
-
-if [ -z "$STRUCTURIZR_SECRET" ]; then
-    MISSING_VARS+=("STRUCTURIZR_SECRET")
-fi
-
-if [ ${#MISSING_VARS[@]} -ne 0 ]; then
-    echo -e "${RED}Error: The following environment variables must be set:${NC}"
-    for var in "${MISSING_VARS[@]}"; do
-        echo -e "  ${RED}$var${NC}"
-    done
-    exit 1
 fi
 
 # Set default URL if not specified
 if [ -z "$STRUCTURIZR_URL" ]; then
     STRUCTURIZR_URL="https://api.structurizr.com"
 fi
-
-# Display configuration (without exposing sensitive info)
-echo -e "${BLUE}Configuration:${NC}"
-echo -e "  STRUCTURIZR_URL: ${STRUCTURIZR_URL}"
-echo -e "  STRUCTURIZR_KEY: $(mask_variable "$STRUCTURIZR_KEY")"
-echo -e "  STRUCTURIZR_SECRET: $(mask_variable "$STRUCTURIZR_SECRET")"
 
 # Collect workspace files from the active directory
 FILES=()
@@ -98,9 +85,33 @@ VALIDATION_FAILED=0
 
 for FILE in "${FILES[@]}"; do
     FILENAME=$(basename "$FILE")
-    ID=$(echo "$FILENAME" | cut -d'-' -f1)
+    ID=$(echo "$FILENAME" | cut -d'-' -f2 | cut -d'.' -f1)
     echo -e "${YELLOW}Validating workspace file: $FILENAME (ID: $ID)${NC}"
-    structurizr.sh validate -workspace "$FILE"
+
+    # Get the key and secret for this workspace
+#    key_var="STRUCTURIZR_KEY_$ID"
+#    secret_var="STRUCTURIZR_SECRET_$ID"
+    # Get the key and secret for this workspace
+    STRUCTURIZR_KEY=$(yq e ".workspaces[] | select(.id == $ID) | .key" "$CONFIG_FILE")
+    STRUCTURIZR_SECRET=$(yq e ".workspaces[] | select(.id == $ID) | .secret" "$CONFIG_FILE")
+
+#    STRUCTURIZR_KEY=${!key_var}
+#    STRUCTURIZR_SECRET=${!secret_var}
+
+    if [ -z "$STRUCTURIZR_KEY" ] || [ -z "$STRUCTURIZR_SECRET" ]; then
+        echo -e "${RED}Error: Key and/or secret not set for workspace ID $ID. Skipping this workspace.${NC}"
+        VALIDATION_FAILED=1
+        continue
+    fi
+
+    # Display configuration (without exposing sensitive info)
+    echo -e "${BLUE}Configuration for workspace ID $ID:${NC}"
+    echo -e "  STRUCTURIZR_URL: ${STRUCTURIZR_URL}"
+    echo -e "  STRUCTURIZR_KEY: $(mask_variable "$STRUCTURIZR_KEY")"
+    echo -e "  STRUCTURIZR_SECRET: $(mask_variable "$STRUCTURIZR_SECRET")"
+
+    # Validate the workspace
+    docker run -it --net=host --rm -v "$PWD/workspaces/active":/usr/local/structurizr structurizr/cli validate --workspace "$FILENAME"
     if [ $? -ne 0 ]; then
         echo -e "${RED}Validation failed for $FILENAME${NC}\n"
         VALIDATION_FAILED=1
@@ -122,17 +133,40 @@ echo -e "${BLUE}\nPushing workspaces to Structurizr:${NC}"
 
 for FILE in "${FILES[@]}"; do
     FILENAME=$(basename "$FILE")
-    ID=$(echo "$FILENAME" | cut -d'-' -f1)
+    ID=$(echo "$FILENAME" | cut -d'-' -f2 | cut -d'.' -f1)
     echo -e "${YELLOW}Pushing workspace file: $FILENAME (ID: $ID)${NC}"
-    structurizr.sh push \
+
+    # Get the key and secret for this workspace
+#    key_var="STRUCTURIZR_KEY_$ID"
+#    secret_var="STRUCTURIZR_SECRET_$ID"
+#    STRUCTURIZR_KEY=${!key_var}
+#    STRUCTURIZR_SECRET=${!secret_var}
+    STRUCTURIZR_KEY=$(yq e ".workspaces[] | select(.id == $ID) | .key" "$CONFIG_FILE")
+    STRUCTURIZR_SECRET=$(yq e ".workspaces[] | select(.id == $ID) | .secret" "$CONFIG_FILE")
+
+    if [ -z "$STRUCTURIZR_KEY" ] || [ -z "$STRUCTURIZR_SECRET" ]; then
+        echo -e "${RED}Error: Key and/or secret not set for workspace ID $ID. Skipping this workspace.${NC}"
+        continue
+    fi
+
+    # Display configuration (without exposing sensitive info)
+    echo -e "${BLUE}Configuration for workspace ID $ID:${NC}"
+    echo -e "  STRUCTURIZR_URL: ${STRUCTURIZR_URL}"
+    echo -e "  STRUCTURIZR_KEY: $(mask_variable "$STRUCTURIZR_KEY")"
+    echo -e "  STRUCTURIZR_SECRET: $(mask_variable "$STRUCTURIZR_SECRET")"
+
+    # Push the workspace
+    docker run -it --net=host --rm -v "$PWD":/usr/local/structurizr structurizr/cli push \
         -id "$ID" \
         -key "$STRUCTURIZR_KEY" \
         -secret "$STRUCTURIZR_SECRET" \
         -workspace "$FILE" \
         -merge true \
+        -archive=false \
         -url "$STRUCTURIZR_URL"
     if [ $? -ne 0 ]; then
         echo -e "${RED}Push failed for $FILENAME${NC}\n"
+        exit 1
     else
         echo -e "${GREEN}Push succeeded for $FILENAME${NC}\n"
     fi
